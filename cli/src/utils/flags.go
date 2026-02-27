@@ -41,6 +41,8 @@ const (
 	FlagGatewayControllerImage = "gateway-controller-base-image"
 	FlagRouterBaseImage        = "router-base-image"
 	FlagHeader                 = "header"
+	FlagFolder                 = "folder"
+	FlagPort                   = "port"
 )
 
 var shortFlags = map[string]string{
@@ -50,6 +52,8 @@ var shortFlags = map[string]string{
 	FlagOutput:        "o",
 	FlagFile:          "f",
 	FlagVersion:       "v",
+	FlagFolder:        "d",
+	FlagPort:          "p",
 }
 
 func GetShortFlags() []string {
@@ -73,5 +77,13 @@ func AddBoolFlag(cmd *cobra.Command, flagName string, p *bool, defaultValue bool
 		cmd.Flags().BoolVarP(p, flagName, short, defaultValue, usage)
 	} else {
 		cmd.Flags().BoolVar(p, flagName, defaultValue, usage)
+	}
+}
+
+func AddIntFlag(cmd *cobra.Command, flagName string, p *int, defaultValue int, usage string) {
+	if short, hasShort := shortFlags[flagName]; hasShort {
+		cmd.Flags().IntVarP(p, flagName, short, defaultValue, usage)
+	} else {
+		cmd.Flags().IntVar(p, flagName, defaultValue, usage)
 	}
 }

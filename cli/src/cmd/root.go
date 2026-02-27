@@ -24,6 +24,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/wso2/api-platform/cli/cmd/gateway"
+	mcpserver "github.com/wso2/api-platform/cli/cmd/mcp-server"
 	"github.com/wso2/api-platform/cli/utils"
 )
 
@@ -65,6 +66,7 @@ var versionCmd = &cobra.Command{
 
 func init() {
 	rootCmd.AddCommand(gateway.GatewayCmd)
+	rootCmd.AddCommand(mcpserver.McpServerCmd)
 	rootCmd.AddCommand(versionCmd)
 }
 
