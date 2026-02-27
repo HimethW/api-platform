@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 
@@ -69,8 +70,16 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 		return fmt.Errorf("Docker is not available or not running: %w\n\nPlease install and start Docker before running this command", err)
 	}
 
-	// Step 2: Create temporary build directory
-	tempDir, err := os.MkdirTemp("", "mcp-server-build-*")
+	// Step 2: Create temporary build directory under ~/.wso2ap/.tmp (same as other CLI commands)
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get user home directory: %w", err)
+	}
+	baseDir := filepath.Join(homeDir, ".wso2ap", ".tmp")
+	if err := utils.EnsureDir(baseDir); err != nil {
+		return fmt.Errorf("failed to create temp base directory: %w", err)
+	}
+	tempDir, err := os.MkdirTemp(baseDir, "mcp-server-build-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temporary build directory: %w", err)
 	}
