@@ -43,6 +43,7 @@ const (
 	FlagHeader                 = "header"
 	FlagFolder                 = "folder"
 	FlagPort                   = "port"
+	FlagOutputDir              = "output-dir"
 )
 
 var shortFlags = map[string]string{

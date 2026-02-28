@@ -31,15 +31,19 @@ import (
 const (
 	GenerateCmdLiteral = "generate"
 	GenerateCmdExample = `# Generate an MCP server Docker image from an Arazzo spec folder
-ap mcp-server generate -f ./my-arazzo-folder
+ap mcp-server generate -d ./my-arazzo-folder
 
 # Generate with a custom port
-ap mcp-server generate -f ./my-arazzo-folder -p 8080`
+ap mcp-server generate -d ./my-arazzo-folder -p 8080
+
+# Generate and save build artifacts to a directory for inspection or manual editing
+ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output`
 )
 
 var (
-	generateFolder string
-	generatePort   int
+	generateFolder    string
+	generatePort      int
+	generateOutputDir string
 )
 
 var generateCmd = &cobra.Command{
@@ -58,6 +62,7 @@ var generateCmd = &cobra.Command{
 func init() {
 	utils.AddStringFlag(generateCmd, utils.FlagFolder, &generateFolder, "", "Path to folder containing Arazzo and OpenAPI spec files (required)")
 	utils.AddIntFlag(generateCmd, utils.FlagPort, &generatePort, utils.DefaultMCPServerPort, "Port the MCP server will listen on")
+	utils.AddStringFlag(generateCmd, utils.FlagOutputDir, &generateOutputDir, "", "Output directory to save generated files (Dockerfile, server code, specs)")
 
 	generateCmd.MarkFlagRequired(utils.FlagFolder)
 }
@@ -120,6 +125,7 @@ func runGenerateCommand() error {
 		ArazzoFileName: arazzoFileName,
 		ServerCode:     serverCode,
 		DockerfileCode: dockerfileCode,
+		OutputDir:      generateOutputDir,
 	}
 
 	if err := mcpserver.BuildMCPServerImage(config); err != nil {

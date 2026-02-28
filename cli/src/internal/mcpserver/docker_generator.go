@@ -37,6 +37,7 @@ type MCPServerBuildConfig struct {
 	ArazzoFileName string
 	ServerCode     string
 	DockerfileCode string
+	OutputDir      string // If set, save build artifacts here and keep them after build
 }
 
 // GenerateDockerfile produces the Dockerfile content for the MCP server image.
@@ -70,35 +71,50 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 		return fmt.Errorf("Docker is not available or not running: %w\n\nPlease install and start Docker before running this command", err)
 	}
 
-	// Step 2: Create temporary build directory under ~/.wso2ap/.tmp (same as other CLI commands)
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get user home directory: %w", err)
+	// Step 2: Determine build directory
+	var buildDir string
+	if config.OutputDir != "" {
+		// Use user-specified output directory — files persist after build
+		absOutputDir, err := filepath.Abs(config.OutputDir)
+		if err != nil {
+			return fmt.Errorf("failed to resolve output directory path: %w", err)
+		}
+		if err := utils.EnsureDir(absOutputDir); err != nil {
+			return fmt.Errorf("failed to create output directory: %w", err)
+		}
+		buildDir = absOutputDir
+	} else {
+		// Use temporary directory under ~/.wso2ap/.tmp — cleaned up after build
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("failed to get user home directory: %w", err)
+		}
+		baseDir := filepath.Join(homeDir, ".wso2ap", ".tmp")
+		if err := utils.EnsureDir(baseDir); err != nil {
+			return fmt.Errorf("failed to create temp base directory: %w", err)
+		}
+		tempDir, err := os.MkdirTemp(baseDir, "mcp-server-build-*")
+		if err != nil {
+			return fmt.Errorf("failed to create temporary build directory: %w", err)
+		}
+		defer os.RemoveAll(tempDir)
+		buildDir = tempDir
 	}
-	baseDir := filepath.Join(homeDir, ".wso2ap", ".tmp")
-	if err := utils.EnsureDir(baseDir); err != nil {
-		return fmt.Errorf("failed to create temp base directory: %w", err)
-	}
-	tempDir, err := os.MkdirTemp(baseDir, "mcp-server-build-*")
-	if err != nil {
-		return fmt.Errorf("failed to create temporary build directory: %w", err)
-	}
-	defer os.RemoveAll(tempDir)
 
 	// Step 3: Create arazzo/ subdirectory and copy spec files into it
-	arazzoDir := tempDir + "/arazzo"
+	arazzoDir := filepath.Join(buildDir, "arazzo")
 	if err := utils.CopyDir(config.FolderPath, arazzoDir); err != nil {
 		return fmt.Errorf("failed to copy spec files to build context: %w", err)
 	}
 
 	// Step 4: Write the generated mcp_server.py
-	serverFilePath := tempDir + "/mcp_server.py"
+	serverFilePath := filepath.Join(buildDir, "mcp_server.py")
 	if err := os.WriteFile(serverFilePath, []byte(config.ServerCode), 0644); err != nil {
 		return fmt.Errorf("failed to write generated server code: %w", err)
 	}
 
 	// Step 5: Write the generated Dockerfile
-	dockerfilePath := tempDir + "/Dockerfile"
+	dockerfilePath := filepath.Join(buildDir, "Dockerfile")
 	if err := os.WriteFile(dockerfilePath, []byte(config.DockerfileCode), 0644); err != nil {
 		return fmt.Errorf("failed to write Dockerfile: %w", err)
 	}
@@ -108,7 +124,7 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 	args := []string{"build", "-t", imageName, "."}
 
 	cmd := exec.Command("docker", args...)
-	cmd.Dir = tempDir
+	cmd.Dir = buildDir
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 
@@ -120,13 +136,17 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 	fmt.Println()
 	runCmd := fmt.Sprintf("docker run -p %d:%d %s", config.Port, config.Port, imageName)
 	serverURL := fmt.Sprintf("http://localhost:%d", config.Port)
-	utils.PrintBoxedMessage([]string{
+	summaryLines := []string{
 		"✅ MCP Server image built successfully!",
 		"",
 		fmt.Sprintf("Image:  %s", imageName),
 		fmt.Sprintf("Run:    %s", runCmd),
 		fmt.Sprintf("URL:    %s", serverURL),
-	})
+	}
+	if config.OutputDir != "" {
+		summaryLines = append(summaryLines, "", fmt.Sprintf("Build artifacts saved to: %s", buildDir))
+	}
+	utils.PrintBoxedMessage(summaryLines)
 
 	return nil
 }
