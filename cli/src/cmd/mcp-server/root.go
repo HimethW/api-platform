@@ -25,17 +25,32 @@ import (
 const (
 	McpServerCmdLiteral = "mcp-server"
 	McpServerCmdExample = `# Generate an MCP server Docker image from an Arazzo spec folder
-ap mcp-server generate -f ./my-arazzo-folder
+ap mcp-server generate -d ./my-arazzo-folder
 
 # Generate with a custom port
-ap mcp-server generate -f ./my-arazzo-folder -p 8080`
+ap mcp-server generate -d ./my-arazzo-folder -p 8080
+
+# Generate and save build artifacts for manual editing
+ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output`
 )
 
 // McpServerCmd represents the mcp-server command
 var McpServerCmd = &cobra.Command{
-	Use:     McpServerCmdLiteral,
-	Short:   "MCP server operations",
-	Long:    "Generate and manage MCP (Model Context Protocol) servers from Arazzo specifications.",
+	Use:   McpServerCmdLiteral,
+	Short: "MCP server operations",
+	Long: `Generate and manage MCP (Model Context Protocol) servers from Arazzo specifications.
+
+This command group allows you to generate a Docker image containing a Python MCP
+server from an Arazzo specification. Each workflow defined in the Arazzo file is
+exposed as an MCP tool, powered by fastmcp and arazzo-runner.
+
+Prerequisites:
+  - Docker must be installed and running
+  - A folder containing a valid Arazzo specification file (.yaml/.yml)
+  - All OpenAPI spec files referenced in the Arazzo sourceDescriptions
+
+Available Commands:
+  generate    Generate an MCP server Docker image from an Arazzo specification`,
 	Example: McpServerCmdExample,
 	Run: func(cmd *cobra.Command, args []string) {
 		cmd.Help()

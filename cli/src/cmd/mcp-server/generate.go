@@ -47,9 +47,38 @@ var (
 )
 
 var generateCmd = &cobra.Command{
-	Use:     GenerateCmdLiteral,
-	Short:   "Generate an MCP server Docker image from an Arazzo specification",
-	Long:    "Generate a Docker image containing a Python MCP server. The server exposes each workflow in the Arazzo specification as an MCP tool, powered by fastmcp and arazzo-runner.",
+	Use:   GenerateCmdLiteral,
+	Short: "Generate an MCP server Docker image from an Arazzo specification",
+	Long: `Generate a Docker image containing a Python MCP server from an Arazzo specification.
+
+The command reads an Arazzo file and its referenced OpenAPI spec files from the
+provided folder, generates a Python MCP server that exposes each workflow as an
+MCP tool, and builds a Docker image ready to run.
+
+Input Folder Requirements:
+  - Must contain exactly one Arazzo specification file (.yaml or .yml)
+  - All OpenAPI files referenced in sourceDescriptions must be present
+  - The Arazzo file must have a valid 'arazzo' version key, 'info.title',
+    and at least one workflow defined
+
+Flags:
+  -d, --folder string       (required) Path to folder containing the Arazzo and
+                             OpenAPI spec files
+  -p, --port int            Port the MCP server will listen on inside the
+                             container and mapped to localhost (default: 5000)
+      --output-dir string   Directory to save generated build artifacts
+                             (Dockerfile, mcp_server.py, arazzo specs). Files
+                             persist after the build for inspection or manual
+                             editing. If not set, a temporary directory is used
+                             and cleaned up automatically.
+
+What Gets Generated:
+  - mcp_server.py    Python MCP server with one @mcp.tool() per workflow
+  - Dockerfile       Builds a Python 3.11 image with fastmcp and arazzo-runner
+  - arazzo/          Copy of all spec files from the input folder
+
+After a successful build, the command prints the Docker image name and the
+exact 'docker run' command to start the server.`,
 	Example: GenerateCmdExample,
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := runGenerateCommand(); err != nil {
