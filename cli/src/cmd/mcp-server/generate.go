@@ -37,13 +37,21 @@ ap mcp-server generate -d ./my-arazzo-folder
 ap mcp-server generate -d ./my-arazzo-folder -p 8080
 
 # Generate and save build artifacts to a directory for inspection or manual editing
-ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output`
+ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output
+
+# Generate and auto-proxy through the active WSO2 API Platform gateway
+ap mcp-server generate -d ./my-arazzo-folder --proxy
+
+# Generate, proxy, and specify a custom gateway context path
+ap mcp-server generate -d ./my-arazzo-folder --proxy --context /petstore-mcp`
 )
 
 var (
 	generateFolder    string
 	generatePort      int
 	generateOutputDir string
+	generateProxy     bool
+	generateContext   string
 )
 
 var generateCmd = &cobra.Command{
@@ -71,6 +79,15 @@ Flags:
                              persist after the build for inspection or manual
                              editing. If not set, a temporary directory is used
                              and cleaned up automatically.
+      --proxy               After building the Docker image, automatically
+                             register the MCP server as a proxy on the active
+                             WSO2 API Platform gateway. This starts a temporary
+                             container, introspects the MCP server (tools, prompts,
+                             resources), generates the gateway config, and deploys
+                             it. Requires a configured and healthy gateway.
+      --context string      Gateway context path for the MCP proxy (e.g. /petstore).
+                             Only used with --proxy. If not set, a default is
+                             derived from the Arazzo spec title.
 
 What Gets Generated:
   - mcp_server.py    Python MCP server with one @mcp.tool() per workflow
@@ -78,7 +95,8 @@ What Gets Generated:
   - arazzo/          Copy of all spec files from the input folder
 
 After a successful build, the command prints the Docker image name and the
-exact 'docker run' command to start the server.`,
+exact 'docker run' command to start the server. With --proxy, it also prints
+the gateway MCP endpoint URL.`,
 	Example: GenerateCmdExample,
 	Run: func(cmd *cobra.Command, args []string) {
 		if err := runGenerateCommand(); err != nil {
@@ -92,6 +110,8 @@ func init() {
 	utils.AddStringFlag(generateCmd, utils.FlagFolder, &generateFolder, "", "Path to folder containing Arazzo and OpenAPI spec files (required)")
 	utils.AddIntFlag(generateCmd, utils.FlagPort, &generatePort, utils.DefaultMCPServerPort, "Port the MCP server will listen on")
 	utils.AddStringFlag(generateCmd, utils.FlagOutputDir, &generateOutputDir, "", "Output directory to save generated files (Dockerfile, server code, specs)")
+	utils.AddBoolFlag(generateCmd, utils.FlagProxy, &generateProxy, false, "Auto-proxy the MCP server through the active WSO2 API Platform gateway")
+	utils.AddStringFlag(generateCmd, utils.FlagContext, &generateContext, "", "Gateway context path for the MCP proxy (only used with --proxy)")
 
 	generateCmd.MarkFlagRequired(utils.FlagFolder)
 }
@@ -159,6 +179,31 @@ func runGenerateCommand() error {
 
 	if err := mcpserver.BuildMCPServerImage(config); err != nil {
 		return err
+	}
+
+	// Step 7: Auto-proxy if --proxy flag is set
+	if generateProxy {
+		fmt.Println()
+		fmt.Println("Setting up gateway proxy...")
+
+		// Determine context path: user-provided or auto-derived from Arazzo title
+		contextPath := generateContext
+		if contextPath == "" {
+			contextPath = mcpserver.DefaultContext(spec.Info.Title)
+			fmt.Printf("Using default context: %s (override with --context)\n", contextPath)
+		}
+
+		imageName := mcpserver.SanitizeImageName(spec.Info.Title)
+		proxyConfig := mcpserver.ProxyConfig{
+			ImageName:  imageName,
+			Port:       generatePort,
+			ArazzoSpec: spec,
+			Context:    contextPath,
+			OutputDir:  generateOutputDir,
+		}
+		if err := mcpserver.AutoProxy(proxyConfig); err != nil {
+			return fmt.Errorf("proxy setup failed: %w", err)
+		}
 	}
 
 	return nil
