@@ -30,8 +30,8 @@ import (
 	"strings"
 	"time"
 
-	mcpgen "github.com/wso2/api-platform/cli/internal/mcp"
 	"github.com/wso2/api-platform/cli/internal/gateway"
+	mcpgen "github.com/wso2/api-platform/cli/internal/mcp"
 	"github.com/wso2/api-platform/cli/utils"
 )
 
