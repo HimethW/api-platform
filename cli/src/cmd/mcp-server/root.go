@@ -30,8 +30,11 @@ const (
 	# Generate with a custom port
 	ap mcp-server generate -d ./my-arazzo-folder -p 8080
 
-	# Generate and save build artifacts for manual editing
-	ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output`
+# Generate and save build artifacts for manual editing
+ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output
+
+# Generate and auto-proxy through the gateway
+ap mcp-server generate -d ./my-arazzo-folder --proxy`
 )
 
 // McpServerCmd represents the mcp-server command
@@ -44,10 +47,15 @@ var McpServerCmd = &cobra.Command{
 	server from an Arazzo specification. Each workflow defined in the Arazzo file is
 	exposed as an MCP tool, powered by fastmcp and arazzo-runner.
 
-	Prerequisites:
-	- Docker must be installed and running
-	- A folder containing a valid Arazzo specification file (.yaml/.yml)
-	- All OpenAPI spec files referenced in the Arazzo sourceDescriptions
+The generated MCP server can optionally be auto-proxied through the WSO2 API
+Platform gateway using the --proxy flag, which handles introspection and
+gateway configuration automatically.
+
+Prerequisites:
+  - Docker must be installed and running
+  - A folder containing a valid Arazzo specification file (.yaml/.yml)
+  - All OpenAPI spec files referenced in the Arazzo sourceDescriptions
+  - (for --proxy) A configured and healthy WSO2 API Platform gateway
 
 	Available Commands:
 	generate    Generate an MCP server Docker image from an Arazzo specification`,

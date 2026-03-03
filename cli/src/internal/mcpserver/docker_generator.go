@@ -120,7 +120,7 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 	}
 
 	// Step 6: Build the Docker image
-	imageName := sanitizeImageName(config.ArazzoSpec.Info.Title)
+	imageName := SanitizeImageName(config.ArazzoSpec.Info.Title)
 	args := []string{"build", "-t", imageName, "."}
 
 	cmd := exec.Command("docker", args...)
@@ -151,10 +151,10 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 	return nil
 }
 
-// sanitizeImageName converts an Arazzo title into a valid Docker image name.
+// SanitizeImageName converts an Arazzo title into a valid Docker image name.
 // It lowercases the string, replaces non-alphanumeric characters with hyphens,
 // collapses multiple hyphens, trims leading/trailing hyphens, and appends "-mcp-server".
-func sanitizeImageName(title string) string {
+func SanitizeImageName(title string) string {
 	name := strings.ToLower(title)
 	// Replace any non-alphanumeric character with a hyphen
 	reg := regexp.MustCompile(`[^a-z0-9]+`)

@@ -44,6 +44,8 @@ const (
 	FlagFolder                 = "folder"
 	FlagPort                   = "port"
 	FlagOutputDir              = "output-dir"
+	FlagProxy                  = "proxy"
+	FlagContext                = "context"
 )
 
 var shortFlags = map[string]string{
