@@ -20,6 +20,7 @@ package mcpserver
 
 import (
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -70,7 +71,7 @@ type InputProperty struct {
 
 // FindArazzoFile scans the given folder for a YAML file that contains the
 // top-level "arazzo" key. Returns the path to the Arazzo file.
-// Returns an error if no Arazzo file is found or if multiple are found.
+// Returns an error if no Arazzo file is found or if multiple are found.(FIX: add multi arazzo file support)
 func FindArazzoFile(folderPath string) (string, error) {
 	entries, err := os.ReadDir(folderPath)
 	if err != nil {
@@ -115,7 +116,7 @@ func isArazzoFile(filePath string) bool {
 		return false
 	}
 
-	_, hasArazzo := raw["arazzo"]
+	_, hasArazzo := raw["arazzo"] //value,isfound := raw["arazzo"]
 	return hasArazzo
 }
 
@@ -152,6 +153,15 @@ func ValidateSourceDescriptions(spec *ArazzoSpec, folderPath string) error {
 		if sd.Type != "openapi" {
 			continue
 		}
+		// If the URL is an HTTP/HTTPS URL, check accessibility instead of a local file
+		if strings.HasPrefix(sd.URL, "http://") || strings.HasPrefix(sd.URL, "https://") {
+			resp, err := http.Head(sd.URL)
+			if err != nil || resp.StatusCode < 200 || resp.StatusCode >= 300 {
+				missing = append(missing, fmt.Sprintf("  sourceDescriptions[%d]: '%s' (name: '%s') - URL not accessible", i, sd.URL, sd.Name))
+			}
+			continue
+		}
+
 		// Resolve the URL relative to the folder
 		resolvedPath := filepath.Join(folderPath, sd.URL)
 		if _, err := os.Stat(resolvedPath); os.IsNotExist(err) {
