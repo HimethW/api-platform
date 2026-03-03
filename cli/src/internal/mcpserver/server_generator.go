@@ -160,7 +160,7 @@ func hasRemoteSourceDescriptions(spec *ArazzoSpec) bool {
 
 // buildParams generates the Python function parameter list from workflow inputs.
 // e.g. "pet_id: int, pet_name: str"
-func buildParams(wf Workflow) string {
+func buildParams(wf Workflow) string { //what are the inputs
 	if wf.Inputs == nil || len(wf.Inputs.Properties) == 0 {
 		return ""
 	}
@@ -177,7 +177,7 @@ func buildParams(wf Workflow) string {
 // buildInputDict generates the Python dict literal mapping original param names
 // to their snake_case function argument names.
 // e.g. `"petId": pet_id, "petName": pet_name`
-func buildInputDict(wf Workflow) string {
+func buildInputDict(wf Workflow) string { //actial values for the inputs
 	if wf.Inputs == nil || len(wf.Inputs.Properties) == 0 {
 		return ""
 	}
