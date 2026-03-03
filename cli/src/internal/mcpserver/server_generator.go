@@ -34,6 +34,8 @@ func GenerateServerCode(spec *ArazzoSpec, arazzoFileName string, port int) (stri
 	var b strings.Builder
 
 	// Imports
+	b.WriteString("import requests\n")
+	b.WriteString("from urllib.parse import urlparse\n")
 	b.WriteString("from fastmcp import FastMCP\n")
 	b.WriteString("from arazzo_runner import ArazzoRunner\n")
 	b.WriteString("\n")
@@ -45,8 +47,26 @@ func GenerateServerCode(spec *ArazzoSpec, arazzoFileName string, port int) (stri
 
 	// Load the Arazzo file
 	b.WriteString("# Load the Arazzo file\n")
-	b.WriteString(fmt.Sprintf("runner = ArazzoRunner.from_arazzo_path(\"./arazzo/%s\")\n", arazzoFileName))
+	b.WriteString(fmt.Sprintf("runner = ArazzoRunner.from_arazzo_path(\"./arazzo/%s\", http_client=requests.Session())\n", arazzoFileName))
 	b.WriteString("\n")
+
+	// Fix relative server URLs for URL-based source descriptions.
+	// When an OpenAPI spec is fetched from a remote URL, its servers[].url may be
+	// a relative path (e.g. "/api/v3"). We resolve these against the source URL.
+	if hasRemoteSourceDescriptions(spec) {
+		b.WriteString("# Resolve relative server URLs in remote source descriptions\n")
+		for _, sd := range spec.SourceDescriptions {
+			if strings.HasPrefix(sd.URL, "http://") || strings.HasPrefix(sd.URL, "https://") {
+				b.WriteString(fmt.Sprintf("if %q in runner.source_descriptions:\n", sd.Name))
+				b.WriteString(fmt.Sprintf("    _parsed = urlparse(%q)\n", sd.URL))
+				b.WriteString(fmt.Sprintf("    _base = f\"{_parsed.scheme}://{_parsed.netloc}\"\n"))
+				b.WriteString(fmt.Sprintf("    for _srv in runner.source_descriptions[%q].get(\"servers\", []):\n", sd.Name))
+				b.WriteString(fmt.Sprintf("        if _srv.get(\"url\", \"\") and not _srv[\"url\"].startswith(\"http\"):\n"))
+				b.WriteString(fmt.Sprintf("            _srv[\"url\"] = _base + _srv[\"url\"]\n"))
+			}
+		}
+		b.WriteString("\n")
+	}
 
 	// Generate a tool for each workflow
 	for i, wf := range spec.Workflows {
@@ -126,6 +146,16 @@ func workflowDocstring(wf Workflow) string {
 		return wf.Description
 	}
 	return fmt.Sprintf("Execute the %s workflow", wf.WorkflowID)
+}
+
+// hasRemoteSourceDescriptions returns true if any sourceDescription uses an HTTP(S) URL.
+func hasRemoteSourceDescriptions(spec *ArazzoSpec) bool {
+	for _, sd := range spec.SourceDescriptions {
+		if strings.HasPrefix(sd.URL, "http://") || strings.HasPrefix(sd.URL, "https://") {
+			return true
+		}
+	}
+	return false
 }
 
 // buildParams generates the Python function parameter list from workflow inputs.
