@@ -24,6 +24,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"github.com/wso2/api-platform/cli/utils"
@@ -36,41 +37,57 @@ type MCPServerBuildConfig struct {
 	ArazzoSpec        *ArazzoSpec
 	ArazzoFileName    string
 	ServerCode        string
+	GeneratedFiles    map[string]string // Relative path -> file content (browser-auth mode)
 	DockerfileCode    string
 	OutputDir         string   // If set, save build artifacts here and keep them after build
+	EnableBrowserAuth bool     // If true, build context uses generated multi-file project
 	CredentialEnvVars []string // List of env var names for credential inputs
 }
 
 // GenerateDockerfile produces the Dockerfile content for the MCP server image.
-// If credentialEnvVars is non-empty, adds commented ENV lines to document them.
-func GenerateDockerfile(port int, credentialEnvVars []string) string {
+// If credentialEnvVars is non-empty in legacy mode, adds commented ENV lines to document them.
+func GenerateDockerfile(port int, credentialEnvVars []string, enableBrowserAuth bool) string {
 	var b strings.Builder
 	b.WriteString("FROM python:3.11-slim\n")
 	b.WriteString("\n")
 	b.WriteString("WORKDIR /app\n")
 	b.WriteString("\n")
-	b.WriteString("# Install Python dependencies\n")
-	b.WriteString("RUN pip install --no-cache-dir fastmcp arazzo-runner\n")
-	b.WriteString("\n")
 	b.WriteString("# Copy the Arazzo spec files and OpenAPI spec files\n")
 	b.WriteString("COPY arazzo/ ./arazzo/\n")
 	b.WriteString("\n")
-	b.WriteString("# Copy the generated MCP server\n")
-	b.WriteString("COPY mcp_server.py .\n")
-	b.WriteString("\n")
 
-	// Add credential env var documentation
-	if len(credentialEnvVars) > 0 {
-		b.WriteString("# Authentication environment variables (pass at runtime with -e)\n")
-		for _, envVar := range credentialEnvVars {
-			b.WriteString(fmt.Sprintf("# ENV %s=<your-value-here>\n", envVar))
-		}
+	if enableBrowserAuth {
+		b.WriteString("# Copy and install Python dependencies\n")
+		b.WriteString("COPY requirements.txt ./requirements.txt\n")
+		b.WriteString("RUN pip install --no-cache-dir -r requirements.txt\n")
 		b.WriteString("\n")
+		b.WriteString("# Copy generated Python module source\n")
+		b.WriteString("COPY src/ ./src/\n")
+		b.WriteString("\n")
+	} else {
+		b.WriteString("# Install Python dependencies\n")
+		b.WriteString("RUN pip install --no-cache-dir fastmcp arazzo-runner\n")
+		b.WriteString("\n")
+		b.WriteString("# Copy the generated MCP server\n")
+		b.WriteString("COPY mcp_server.py .\n")
+		b.WriteString("\n")
+
+		if len(credentialEnvVars) > 0 {
+			b.WriteString("# Authentication environment variables (pass at runtime with -e)\n")
+			for _, envVar := range credentialEnvVars {
+				b.WriteString(fmt.Sprintf("# ENV %s=<your-value-here>\n", envVar))
+			}
+			b.WriteString("\n")
+		}
 	}
 
 	b.WriteString(fmt.Sprintf("EXPOSE %d\n", port))
 	b.WriteString("\n")
-	b.WriteString("CMD [\"python\", \"mcp_server.py\"]\n")
+	if enableBrowserAuth {
+		b.WriteString("CMD [\"python\", \"-m\", \"src.main\"]\n")
+	} else {
+		b.WriteString("CMD [\"python\", \"mcp_server.py\"]\n")
+	}
 	return b.String()
 }
 
@@ -86,7 +103,7 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 	// Step 2: Determine build directory
 	var buildDir string
 	if config.OutputDir != "" {
-		// Use user-specified output directory — files persist after build
+		// Use user-specified output directory - files persist after build
 		absOutputDir, err := filepath.Abs(config.OutputDir)
 		if err != nil {
 			return fmt.Errorf("failed to resolve output directory path: %w", err)
@@ -96,7 +113,7 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 		}
 		buildDir = absOutputDir
 	} else {
-		// Use temporary directory under ~/.wso2ap/.tmp — cleaned up after build
+		// Use temporary directory under ~/.wso2ap/.tmp - cleaned up after build
 		homeDir, err := os.UserHomeDir()
 		if err != nil {
 			return fmt.Errorf("failed to get user home directory: %w", err)
@@ -119,10 +136,34 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 		return fmt.Errorf("failed to copy spec files to build context: %w", err)
 	}
 
-	// Step 4: Write the generated mcp_server.py
-	serverFilePath := filepath.Join(buildDir, "mcp_server.py")
-	if err := os.WriteFile(serverFilePath, []byte(config.ServerCode), 0644); err != nil {
-		return fmt.Errorf("failed to write generated server code: %w", err)
+	// Step 4: Write generated Python artifacts
+	if config.EnableBrowserAuth {
+		if len(config.GeneratedFiles) == 0 {
+			return fmt.Errorf("browser-auth mode enabled but no generated files were provided")
+		}
+		paths := make([]string, 0, len(config.GeneratedFiles))
+		for relPath := range config.GeneratedFiles {
+			paths = append(paths, relPath)
+		}
+		sort.Strings(paths)
+		for _, relPath := range paths {
+			clean := filepath.Clean(relPath)
+			if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") {
+				return fmt.Errorf("invalid generated file path: %s", relPath)
+			}
+			destPath := filepath.Join(buildDir, clean)
+			if err := utils.EnsureDir(filepath.Dir(destPath)); err != nil {
+				return fmt.Errorf("failed to create directory for generated file '%s': %w", relPath, err)
+			}
+			if err := os.WriteFile(destPath, []byte(config.GeneratedFiles[relPath]), 0644); err != nil {
+				return fmt.Errorf("failed to write generated file '%s': %w", relPath, err)
+			}
+		}
+	} else {
+		serverFilePath := filepath.Join(buildDir, "mcp_server.py")
+		if err := os.WriteFile(serverFilePath, []byte(config.ServerCode), 0644); err != nil {
+			return fmt.Errorf("failed to write generated server code: %w", err)
+		}
 	}
 
 	// Step 5: Write the generated Dockerfile
@@ -147,20 +188,22 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 	// Step 7: Print success summary
 	fmt.Println()
 	runParts := []string{fmt.Sprintf("docker run -p %d:%d", config.Port, config.Port)}
-	for _, envVar := range config.CredentialEnvVars {
-		runParts = append(runParts, fmt.Sprintf("-e %s=<value>", envVar))
+	if !config.EnableBrowserAuth {
+		for _, envVar := range config.CredentialEnvVars {
+			runParts = append(runParts, fmt.Sprintf("-e %s=<value>", envVar))
+		}
 	}
 	runParts = append(runParts, imageName)
 	runCmd := strings.Join(runParts, " ")
 	serverURL := fmt.Sprintf("http://localhost:%d", config.Port)
 	summaryLines := []string{
-		"✅ MCP Server image built successfully!",
+		"MCP Server image built successfully!",
 		"",
 		fmt.Sprintf("Image:  %s", imageName),
 		fmt.Sprintf("Run:    %s", runCmd),
 		fmt.Sprintf("URL:    %s", serverURL),
 	}
-	if len(config.CredentialEnvVars) > 0 {
+	if !config.EnableBrowserAuth && len(config.CredentialEnvVars) > 0 {
 		summaryLines = append(summaryLines, "", "Required environment variables:")
 		for _, envVar := range config.CredentialEnvVars {
 			summaryLines = append(summaryLines, fmt.Sprintf("  %s", envVar))

@@ -44,6 +44,8 @@ const (
 	FlagFolder                 = "folder"
 	FlagPort                   = "port"
 	FlagOutputDir              = "output-dir"
+	FlagEnableBrowserAuth      = "enable-browser-auth"
+	FlagAuthServerURL          = "auth-server-url"
 )
 
 var shortFlags = map[string]string{

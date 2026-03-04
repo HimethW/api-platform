@@ -20,8 +20,10 @@ package mcpserver
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/wso2/api-platform/cli/internal/mcpserver"
@@ -37,13 +39,18 @@ ap mcp-server generate -d ./my-arazzo-folder
 ap mcp-server generate -d ./my-arazzo-folder -p 8080
 
 # Generate and save build artifacts to a directory for inspection or manual editing
-ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output`
+ap mcp-server generate -d ./my-arazzo-folder --output-dir ./my-output
+
+# Generate with browser OAuth challenge support (PRM + WWW-Authenticate)
+ap mcp-server generate -d ./my-arazzo-folder --enable-browser-auth --auth-server-url https://api.mycompany.com/oauth2/token`
 )
 
 var (
-	generateFolder    string
-	generatePort      int
-	generateOutputDir string
+	generateFolder            string
+	generatePort              int
+	generateOutputDir         string
+	generateEnableBrowserAuth bool
+	generateAuthServerURL     string
 )
 
 var generateCmd = &cobra.Command{
@@ -52,8 +59,8 @@ var generateCmd = &cobra.Command{
 	Long: `Generate a Docker image containing a Python MCP server from an Arazzo specification.
 
 The command reads an Arazzo file and its referenced OpenAPI spec files from the
-provided folder, generates a Python MCP server that exposes each workflow as an
-MCP tool, and builds a Docker image ready to run.
+provided folder, generates Python MCP server code from workflows, and builds a
+Docker image ready to run.
 
 Input Folder Requirements:
   - Must contain exactly one Arazzo specification file (.yaml or .yml)
@@ -66,16 +73,25 @@ Flags:
                              OpenAPI spec files
   -p, --port int            Port the MCP server will listen on inside the
                              container and mapped to localhost (default: 5000)
-      --output-dir string   Directory to save generated build artifacts
-                             (Dockerfile, mcp_server.py, arazzo specs). Files
-                             persist after the build for inspection or manual
-                             editing. If not set, a temporary directory is used
-                             and cleaned up automatically.
+      --enable-browser-auth Enable browser OAuth challenge flow (401 with
+                             WWW-Authenticate and PRM endpoint)
+      --auth-server-url     Authorization server URL used in PRM response.
+                             Required when --enable-browser-auth is set.
+      --output-dir string   Directory to save generated build artifacts.
+                             If not set, a temporary directory is used and
+                             cleaned up automatically.
 
 What Gets Generated:
-  - mcp_server.py    Python MCP server with one @mcp.tool() per workflow
-  - Dockerfile       Builds a Python 3.11 image with fastmcp and arazzo-runner
-  - arazzo/          Copy of all spec files from the input folder
+  - Legacy mode (default):
+    - mcp_server.py    Python MCP server with one @mcp.tool() per workflow
+    - Dockerfile       Builds a Python 3.11 image with fastmcp and arazzo-runner
+    - arazzo/          Copy of all spec files from the input folder
+
+  - Browser-auth mode (--enable-browser-auth):
+    - src/main.py, src/auth.py, src/tools.py, src/__init__.py
+    - requirements.txt
+    - Dockerfile running "python -m src.main"
+    - arazzo/ copy of all spec files from the input folder
 
 After a successful build, the command prints the Docker image name and the
 exact 'docker run' command to start the server.`,
@@ -92,6 +108,8 @@ func init() {
 	utils.AddStringFlag(generateCmd, utils.FlagFolder, &generateFolder, "", "Path to folder containing Arazzo and OpenAPI spec files (required)")
 	utils.AddIntFlag(generateCmd, utils.FlagPort, &generatePort, utils.DefaultMCPServerPort, "Port the MCP server will listen on")
 	utils.AddStringFlag(generateCmd, utils.FlagOutputDir, &generateOutputDir, "", "Output directory to save generated files (Dockerfile, server code, specs)")
+	utils.AddBoolFlag(generateCmd, utils.FlagEnableBrowserAuth, &generateEnableBrowserAuth, false, "Enable browser OAuth challenge flow (PRM + WWW-Authenticate)")
+	utils.AddStringFlag(generateCmd, utils.FlagAuthServerURL, &generateAuthServerURL, "", "OAuth authorization server URL used in PRM response")
 
 	generateCmd.MarkFlagRequired(utils.FlagFolder)
 }
@@ -114,6 +132,17 @@ func runGenerateCommand() error {
 	if !info.IsDir() {
 		return fmt.Errorf("path is not a directory: %s", absFolder)
 	}
+	if generateEnableBrowserAuth && generateAuthServerURL == "" {
+		return fmt.Errorf("--%s is required when --%s is enabled", utils.FlagAuthServerURL, utils.FlagEnableBrowserAuth)
+	}
+	if generateEnableBrowserAuth {
+		authURL := strings.TrimSpace(generateAuthServerURL)
+		parsed, parseErr := url.ParseRequestURI(authURL)
+		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" {
+			return fmt.Errorf("--%s must be an absolute URL (for example: https://idp.example.com/oauth2/token)", utils.FlagAuthServerURL)
+		}
+		generateAuthServerURL = authURL
+	}
 
 	// Step 1: Find the Arazzo file
 	fmt.Println("Validating input folder...")
@@ -135,32 +164,43 @@ func runGenerateCommand() error {
 	}
 	fmt.Printf("Found Arazzo spec: %s with %d workflow(s)\n", spec.Info.Title, len(spec.Workflows))
 
-	// Step 3.5: Collect credential env vars across all workflows
+	// Step 3.5: Collect credential env vars across all workflows (legacy mode only)
 	var credentialEnvVars []string
-	credentialSet := make(map[string]bool)
-	for _, wf := range spec.Workflows {
-		classified := mcpserver.ClassifyInputs(wf)
-		for inputName := range classified.CredentialInputs {
-			envVar := mcpserver.CredentialEnvVarName(spec.Info.Title, inputName)
-			if !credentialSet[envVar] {
-				credentialEnvVars = append(credentialEnvVars, envVar)
-				credentialSet[envVar] = true
+	if !generateEnableBrowserAuth {
+		credentialSet := make(map[string]bool)
+		for _, wf := range spec.Workflows {
+			classified := mcpserver.ClassifyInputs(wf)
+			for inputName := range classified.CredentialInputs {
+				envVar := mcpserver.CredentialEnvVarName(spec.Info.Title, inputName)
+				if !credentialSet[envVar] {
+					credentialEnvVars = append(credentialEnvVars, envVar)
+					credentialSet[envVar] = true
+				}
 			}
 		}
-	}
-	if len(credentialEnvVars) > 0 {
-		fmt.Printf("Detected %d credential input(s) — will use environment variables\n", len(credentialEnvVars))
+		if len(credentialEnvVars) > 0 {
+			fmt.Printf("Detected %d credential input(s) - will use environment variables\n", len(credentialEnvVars))
+		}
 	}
 
-	// Step 4: Generate the Python MCP server code
+	// Step 4: Generate Python MCP server artifacts
 	fmt.Println("Generating MCP server code...")
-	serverCode, err := mcpserver.GenerateServerCode(spec, arazzoFileName, generatePort)
-	if err != nil {
-		return fmt.Errorf("failed to generate server code: %w", err)
+	var serverCode string
+	var generatedFiles map[string]string
+	if generateEnableBrowserAuth {
+		generatedFiles, err = mcpserver.GenerateBrowserAuthProject(spec, arazzoFileName, generatePort, generateAuthServerURL)
+		if err != nil {
+			return fmt.Errorf("failed to generate browser-auth server project: %w", err)
+		}
+	} else {
+		serverCode, err = mcpserver.GenerateServerCode(spec, arazzoFileName, generatePort)
+		if err != nil {
+			return fmt.Errorf("failed to generate server code: %w", err)
+		}
 	}
 
 	// Step 5: Generate the Dockerfile
-	dockerfileCode := mcpserver.GenerateDockerfile(generatePort, credentialEnvVars)
+	dockerfileCode := mcpserver.GenerateDockerfile(generatePort, credentialEnvVars, generateEnableBrowserAuth)
 
 	// Step 6: Build the Docker image
 	fmt.Println("Building Docker image...")
@@ -170,8 +210,10 @@ func runGenerateCommand() error {
 		ArazzoSpec:        spec,
 		ArazzoFileName:    arazzoFileName,
 		ServerCode:        serverCode,
+		GeneratedFiles:    generatedFiles,
 		DockerfileCode:    dockerfileCode,
 		OutputDir:         generateOutputDir,
+		EnableBrowserAuth: generateEnableBrowserAuth,
 		CredentialEnvVars: credentialEnvVars,
 	}
 
