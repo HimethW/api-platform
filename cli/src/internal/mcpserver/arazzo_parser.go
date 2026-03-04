@@ -23,7 +23,9 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
+	"unicode"
 
 	"gopkg.in/yaml.v3"
 )
@@ -174,4 +176,102 @@ func ValidateSourceDescriptions(spec *ArazzoSpec, folderPath string) error {
 	}
 
 	return nil
+}
+
+// ─── Credential Detection ──────────────────────────────────────────────────────
+
+// ClassifiedInputs separates a workflow's inputs into regular params and credentials.
+type ClassifiedInputs struct {
+	RegularInputs    map[string]InputProperty // Become MCP tool function parameters
+	CredentialInputs map[string]InputProperty // Read from environment variables
+}
+
+// IsCredentialInput returns true if the input property name or description suggests
+// it is a credential (API key, token, password, etc.) that should be provided via
+// environment variables rather than MCP tool parameters.
+func IsCredentialInput(name string, prop InputProperty) bool {
+	// Check the property name (case-insensitive)
+	lowerName := strings.ToLower(name)
+	nameKeywords := []string{
+		"key", "token", "password", "secret", "auth",
+		"credential", "apikey", "api_key", "bearer",
+		"authorization", "client_id", "clientid",
+		"client_secret", "clientsecret",
+	}
+	for _, keyword := range nameKeywords {
+		if strings.Contains(lowerName, keyword) {
+			return true
+		}
+	}
+
+	// Check the description (case-insensitive)
+	lowerDesc := strings.ToLower(prop.Description)
+	descKeywords := []string{
+		"api key", "api-key", "token", "password", "secret",
+		"authentication", "authorization", "credential", "bearer",
+		"oauth", "client id", "client secret", "access token",
+	}
+	for _, keyword := range descKeywords {
+		if strings.Contains(lowerDesc, keyword) {
+			return true
+		}
+	}
+
+	return false
+}
+
+// ClassifyInputs splits workflow inputs into regular and credential categories.
+func ClassifyInputs(wf Workflow) ClassifiedInputs {
+	result := ClassifiedInputs{
+		RegularInputs:    make(map[string]InputProperty),
+		CredentialInputs: make(map[string]InputProperty),
+	}
+	if wf.Inputs == nil {
+		return result
+	}
+	for name, prop := range wf.Inputs.Properties {
+		if IsCredentialInput(name, prop) {
+			result.CredentialInputs[name] = prop
+		} else {
+			result.RegularInputs[name] = prop
+		}
+	}
+	return result
+}
+
+// CredentialEnvVarName generates a Docker environment variable name from the
+// Arazzo spec title and the input property name.
+// Example: title="Petstore API", inputName="apiKey" → "PETSTORE_API_API_KEY"
+func CredentialEnvVarName(specTitle string, inputName string) string {
+	// Convert title: uppercase, replace non-alnum with underscore
+	title := strings.ToUpper(specTitle)
+	reg := regexp.MustCompile(`[^A-Z0-9]+`)
+	title = reg.ReplaceAllString(title, "_")
+	title = strings.Trim(title, "_")
+
+	// Convert input name: insert underscore before capitals, then uppercase
+	inputSnake := camelToSnakeUpper(inputName)
+
+	return title + "_" + inputSnake
+}
+
+// camelToSnakeUpper converts camelCase to UPPER_SNAKE_CASE.
+func camelToSnakeUpper(s string) string {
+	var result strings.Builder
+	for i, r := range s {
+		if unicode.IsUpper(r) {
+			if i > 0 {
+				prev := rune(s[i-1])
+				if unicode.IsLower(prev) || unicode.IsDigit(prev) {
+					result.WriteRune('_')
+				} else if unicode.IsUpper(prev) && i+1 < len(s) && unicode.IsLower(rune(s[i+1])) {
+					result.WriteRune('_')
+				}
+			}
+			result.WriteRune(unicode.ToUpper(r))
+		} else {
+			result.WriteRune(unicode.ToUpper(r))
+		}
+	}
+	return result.String()
 }

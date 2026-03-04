@@ -135,6 +135,23 @@ func runGenerateCommand() error {
 	}
 	fmt.Printf("Found Arazzo spec: %s with %d workflow(s)\n", spec.Info.Title, len(spec.Workflows))
 
+	// Step 3.5: Collect credential env vars across all workflows
+	var credentialEnvVars []string
+	credentialSet := make(map[string]bool)
+	for _, wf := range spec.Workflows {
+		classified := mcpserver.ClassifyInputs(wf)
+		for inputName := range classified.CredentialInputs {
+			envVar := mcpserver.CredentialEnvVarName(spec.Info.Title, inputName)
+			if !credentialSet[envVar] {
+				credentialEnvVars = append(credentialEnvVars, envVar)
+				credentialSet[envVar] = true
+			}
+		}
+	}
+	if len(credentialEnvVars) > 0 {
+		fmt.Printf("Detected %d credential input(s) — will use environment variables\n", len(credentialEnvVars))
+	}
+
 	// Step 4: Generate the Python MCP server code
 	fmt.Println("Generating MCP server code...")
 	serverCode, err := mcpserver.GenerateServerCode(spec, arazzoFileName, generatePort)
@@ -143,18 +160,19 @@ func runGenerateCommand() error {
 	}
 
 	// Step 5: Generate the Dockerfile
-	dockerfileCode := mcpserver.GenerateDockerfile(generatePort)
+	dockerfileCode := mcpserver.GenerateDockerfile(generatePort, credentialEnvVars)
 
 	// Step 6: Build the Docker image
 	fmt.Println("Building Docker image...")
 	config := mcpserver.MCPServerBuildConfig{
-		FolderPath:     absFolder,
-		Port:           generatePort,
-		ArazzoSpec:     spec,
-		ArazzoFileName: arazzoFileName,
-		ServerCode:     serverCode,
-		DockerfileCode: dockerfileCode,
-		OutputDir:      generateOutputDir,
+		FolderPath:        absFolder,
+		Port:              generatePort,
+		ArazzoSpec:        spec,
+		ArazzoFileName:    arazzoFileName,
+		ServerCode:        serverCode,
+		DockerfileCode:    dockerfileCode,
+		OutputDir:         generateOutputDir,
+		CredentialEnvVars: credentialEnvVars,
 	}
 
 	if err := mcpserver.BuildMCPServerImage(config); err != nil {

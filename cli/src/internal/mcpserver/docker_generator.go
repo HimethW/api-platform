@@ -31,17 +31,19 @@ import (
 
 // MCPServerBuildConfig holds all parameters needed to build the MCP server Docker image.
 type MCPServerBuildConfig struct {
-	FolderPath     string
-	Port           int
-	ArazzoSpec     *ArazzoSpec
-	ArazzoFileName string
-	ServerCode     string
-	DockerfileCode string
-	OutputDir      string // If set, save build artifacts here and keep them after build
+	FolderPath        string
+	Port              int
+	ArazzoSpec        *ArazzoSpec
+	ArazzoFileName    string
+	ServerCode        string
+	DockerfileCode    string
+	OutputDir         string   // If set, save build artifacts here and keep them after build
+	CredentialEnvVars []string // List of env var names for credential inputs
 }
 
 // GenerateDockerfile produces the Dockerfile content for the MCP server image.
-func GenerateDockerfile(port int) string {
+// If credentialEnvVars is non-empty, adds commented ENV lines to document them.
+func GenerateDockerfile(port int, credentialEnvVars []string) string {
 	var b strings.Builder
 	b.WriteString("FROM python:3.11-slim\n")
 	b.WriteString("\n")
@@ -56,6 +58,16 @@ func GenerateDockerfile(port int) string {
 	b.WriteString("# Copy the generated MCP server\n")
 	b.WriteString("COPY mcp_server.py .\n")
 	b.WriteString("\n")
+
+	// Add credential env var documentation
+	if len(credentialEnvVars) > 0 {
+		b.WriteString("# Authentication environment variables (pass at runtime with -e)\n")
+		for _, envVar := range credentialEnvVars {
+			b.WriteString(fmt.Sprintf("# ENV %s=<your-value-here>\n", envVar))
+		}
+		b.WriteString("\n")
+	}
+
 	b.WriteString(fmt.Sprintf("EXPOSE %d\n", port))
 	b.WriteString("\n")
 	b.WriteString("CMD [\"python\", \"mcp_server.py\"]\n")
@@ -134,7 +146,12 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 
 	// Step 7: Print success summary
 	fmt.Println()
-	runCmd := fmt.Sprintf("docker run -p %d:%d %s", config.Port, config.Port, imageName)
+	runParts := []string{fmt.Sprintf("docker run -p %d:%d", config.Port, config.Port)}
+	for _, envVar := range config.CredentialEnvVars {
+		runParts = append(runParts, fmt.Sprintf("-e %s=<value>", envVar))
+	}
+	runParts = append(runParts, imageName)
+	runCmd := strings.Join(runParts, " ")
 	serverURL := fmt.Sprintf("http://localhost:%d", config.Port)
 	summaryLines := []string{
 		"✅ MCP Server image built successfully!",
@@ -142,6 +159,12 @@ func BuildMCPServerImage(config MCPServerBuildConfig) error {
 		fmt.Sprintf("Image:  %s", imageName),
 		fmt.Sprintf("Run:    %s", runCmd),
 		fmt.Sprintf("URL:    %s", serverURL),
+	}
+	if len(config.CredentialEnvVars) > 0 {
+		summaryLines = append(summaryLines, "", "Required environment variables:")
+		for _, envVar := range config.CredentialEnvVars {
+			summaryLines = append(summaryLines, fmt.Sprintf("  %s", envVar))
+		}
 	}
 	if config.OutputDir != "" {
 		summaryLines = append(summaryLines, "", fmt.Sprintf("Build artifacts saved to: %s", buildDir))
