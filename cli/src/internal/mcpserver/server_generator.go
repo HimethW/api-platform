@@ -20,20 +20,29 @@ package mcpserver
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 	"unicode"
 )
 
 // GenerateServerCode produces the Python MCP server script from a parsed Arazzo spec.
 // The generated server uses fastmcp and arazzo_runner to expose each workflow as a tool.
+// Credential inputs (detected by name/description heuristics) are exposed as regular
+// MCP tool parameters so the AI agent can prompt each user for their own token.
 func GenerateServerCode(spec *ArazzoSpec, arazzoFileName string, port int) (string, error) {
 	if len(spec.Workflows) == 0 {
 		return "", fmt.Errorf("no workflows found in Arazzo spec to generate tools from")
 	}
 
+	// ── Classify all workflow inputs ──
+	workflowClassified := make(map[string]ClassifiedInputs) // key = workflowID
+	for _, wf := range spec.Workflows {
+		workflowClassified[wf.WorkflowID] = ClassifyInputs(wf)
+	}
+
 	var b strings.Builder
 
-	// Imports
+	// ── Imports ──
 	b.WriteString("import requests\n")
 	b.WriteString("from urllib.parse import urlparse\n")
 	b.WriteString("from fastmcp import FastMCP\n")
@@ -47,12 +56,13 @@ func GenerateServerCode(spec *ArazzoSpec, arazzoFileName string, port int) (stri
 
 	// Load the Arazzo file
 	b.WriteString("# Load the Arazzo file\n")
-	b.WriteString(fmt.Sprintf("runner = ArazzoRunner.from_arazzo_path(\"./arazzo/%s\", http_client=requests.Session())\n", arazzoFileName))
+	b.WriteString("_http = requests.Session()\n")
+	b.WriteString("_http.verify = False  # allow self-signed / internal certs\n")
+	b.WriteString("import urllib3; urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)\n")
+	b.WriteString(fmt.Sprintf("runner = ArazzoRunner.from_arazzo_path(\"./arazzo/%s\", http_client=_http)\n", arazzoFileName))
 	b.WriteString("\n")
 
-	// Fix relative server URLs for URL-based source descriptions.
-	// When an OpenAPI spec is fetched from a remote URL, its servers[].url may be
-	// a relative path (e.g. "/api/v3"). We resolve these against the source URL.
+	// Fix relative server URLs for URL-based source descriptions
 	if hasRemoteSourceDescriptions(spec) {
 		b.WriteString("# Resolve relative server URLs in remote source descriptions\n")
 		for _, sd := range spec.SourceDescriptions {
@@ -68,20 +78,27 @@ func GenerateServerCode(spec *ArazzoSpec, arazzoFileName string, port int) (stri
 		b.WriteString("\n")
 	}
 
-	// Generate a tool for each workflow
+	// ── Generate a tool for each workflow ──
 	for i, wf := range spec.Workflows {
 		if i > 0 {
 			b.WriteString("\n")
 		}
 
+		classified := workflowClassified[wf.WorkflowID]
+
 		funcName := camelToSnake(wf.WorkflowID)
-		docstring := workflowDocstring(wf)
-		params := buildParams(wf)
-		inputDict := buildInputDict(wf)
+		docstring := workflowDocstringWithAuth(wf, classified)
+
+		// Function params = regular inputs + credential inputs (as tool params)
+		params := buildAllParams(classified.RegularInputs, classified.CredentialInputs)
+
+		// Input dict = maps all params (original Arazzo name → Python variable name)
+		inputDict := buildAllInputDict(classified.RegularInputs, classified.CredentialInputs)
 
 		b.WriteString(fmt.Sprintf("# ── Tool %d: %s workflow\n", i+1, wf.WorkflowID))
 		b.WriteString("@mcp.tool()\n")
 		b.WriteString(fmt.Sprintf("async def %s(%s) -> str:\n", funcName, params))
+		// Write multi-line docstring
 		b.WriteString(fmt.Sprintf("    \"\"\"%s\"\"\"\n", docstring))
 		b.WriteString("    try:\n")
 		b.WriteString(fmt.Sprintf("        result = runner.execute_workflow(%q, {%s})\n", wf.WorkflowID, inputDict))
@@ -138,6 +155,7 @@ func arazzoTypeToPython(t string) string {
 }
 
 // workflowDocstring returns the docstring for a workflow tool function.
+// DEPRECATED: Use workflowDocstringWithAuth for new code.
 func workflowDocstring(wf Workflow) string {
 	if wf.Summary != "" {
 		return wf.Summary
@@ -146,6 +164,29 @@ func workflowDocstring(wf Workflow) string {
 		return wf.Description
 	}
 	return fmt.Sprintf("Execute the %s workflow", wf.WorkflowID)
+}
+
+// workflowDocstringWithAuth returns the docstring for a workflow tool function,
+// appending authentication instructions when credential inputs are detected.
+func workflowDocstringWithAuth(wf Workflow, classified ClassifiedInputs) string {
+	base := workflowDocstring(wf)
+	if len(classified.CredentialInputs) == 0 {
+		return base
+	}
+
+	// Build auth note with the Python parameter names
+	var credParamNames []string
+	for name := range classified.CredentialInputs {
+		credParamNames = append(credParamNames, "'"+toPythonParamName(name)+"'")
+	}
+	sort.Strings(credParamNames)
+
+	authNote := fmt.Sprintf("\n\n    IMPORTANT: This tool requires authentication. "+
+		"Please provide your WSO2 access token in the %s parameter. "+
+		"If the user does not have a token, ask them to generate one from the WSO2 API Manager Developer Portal (devportal).",
+		strings.Join(credParamNames, " and "))
+
+	return base + authNote
 }
 
 // hasRemoteSourceDescriptions returns true if any sourceDescription uses an HTTP(S) URL.
@@ -160,24 +201,41 @@ func hasRemoteSourceDescriptions(spec *ArazzoSpec) bool {
 
 // buildParams generates the Python function parameter list from workflow inputs.
 // e.g. "pet_id: int, pet_name: str"
-func buildParams(wf Workflow) string {
+// DEPRECATED: Use buildParamsFromMap for new code that separates credentials.
+func buildParams(wf Workflow) string { //what are the inputs
 	if wf.Inputs == nil || len(wf.Inputs.Properties) == 0 {
 		return ""
 	}
 
-	// Collect parameters in a deterministic order by iterating the map
 	var parts []string
 	for name, prop := range wf.Inputs.Properties {
 		pyType := arazzoTypeToPython(prop.Type)
 		parts = append(parts, fmt.Sprintf("%s: %s", name, pyType))
 	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
+// buildParamsFromMap generates Python function parameters from the regular inputs only.
+// Credential inputs are excluded because they come from environment variables.
+func buildParamsFromMap(inputs map[string]InputProperty) string {
+	if len(inputs) == 0 {
+		return ""
+	}
+	var parts []string
+	for name, prop := range inputs {
+		pyType := arazzoTypeToPython(prop.Type)
+		parts = append(parts, fmt.Sprintf("%s: %s", name, pyType))
+	}
+	sort.Strings(parts)
 	return strings.Join(parts, ", ")
 }
 
 // buildInputDict generates the Python dict literal mapping original param names
 // to their snake_case function argument names.
 // e.g. `"petId": pet_id, "petName": pet_name`
-func buildInputDict(wf Workflow) string {
+// DEPRECATED: Use buildInputDictWithCredentials for new code.
+func buildInputDict(wf Workflow) string { //actial values for the inputs
 	if wf.Inputs == nil || len(wf.Inputs.Properties) == 0 {
 		return ""
 	}
@@ -186,5 +244,108 @@ func buildInputDict(wf Workflow) string {
 	for name := range wf.Inputs.Properties {
 		parts = append(parts, fmt.Sprintf("%q: %s", name, name))
 	}
+	sort.Strings(parts)
 	return strings.Join(parts, ", ")
+}
+
+// buildInputDictWithCredentials generates the Python dict literal for execute_workflow(),
+// combining regular param references (function args) with credential env var references.
+// e.g. `"petId": petId, "apiKey": PETSTORE_API_API_KEY`
+func buildInputDictWithCredentials(
+	regular map[string]InputProperty,
+	credentials map[string]InputProperty,
+	specTitle string,
+) string {
+	var parts []string
+	for name := range regular {
+		parts = append(parts, fmt.Sprintf("%q: %s", name, name))
+	}
+	for name := range credentials {
+		envVar := CredentialEnvVarName(specTitle, name)
+		parts = append(parts, fmt.Sprintf("%q: %s", name, envVar))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
+// toPythonParamName converts any input name to a valid Python parameter name using camelCase.
+// Handles kebab-case (Internal-Key → internalKey) and other non-identifier characters.
+func toPythonParamName(name string) string {
+	// First convert hyphens and spaces to underscores temporarily to help camelizing
+	result := strings.ReplaceAll(name, "-", "_")
+	result = strings.ReplaceAll(result, " ", "_")
+
+	// Convert to camelCase
+	var clean strings.Builder
+	capitalizeNext := false
+	for i, r := range result {
+		if r == '_' {
+			capitalizeNext = true
+			continue
+		}
+
+		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			continue // Skip other non-identifier chars
+		}
+
+		if i == 0 || (clean.Len() == 0) {
+			clean.WriteRune(unicode.ToLower(r))
+		} else if capitalizeNext {
+			clean.WriteRune(unicode.ToUpper(r))
+			capitalizeNext = false
+		} else {
+			clean.WriteRune(r)
+		}
+	}
+
+	result = clean.String()
+	if result == "" {
+		result = "param"
+	}
+	return result
+}
+
+// buildAllParams generates the Python function parameter list including both
+// regular inputs (names used as-is) and credential inputs (names converted to
+// valid Python identifiers via toPythonParamName). All params become str/int/etc.
+func buildAllParams(regular map[string]InputProperty, credentials map[string]InputProperty) string {
+	var parts []string
+	for name, prop := range regular {
+		pyType := arazzoTypeToPython(prop.Type)
+		parts = append(parts, fmt.Sprintf("%s: %s", name, pyType))
+	}
+	for name, prop := range credentials {
+		pyName := toPythonParamName(name)
+		pyType := arazzoTypeToPython(prop.Type)
+		parts = append(parts, fmt.Sprintf("%s: %s", pyName, pyType))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
+// buildAllInputDict generates the Python dict literal for execute_workflow(),
+// mapping each original Arazzo input name to its Python variable name.
+// Regular inputs use their original name as-is (e.g. "petId": petId).
+// Credential inputs use the converted Python name (e.g. "internalKey": internal_key).
+func buildAllInputDict(regular map[string]InputProperty, credentials map[string]InputProperty) string {
+	var parts []string
+	for name := range regular {
+		parts = append(parts, fmt.Sprintf("%q: %s", name, name))
+	}
+	for name := range credentials {
+		pyName := toPythonParamName(name)
+		parts = append(parts, fmt.Sprintf("%q: %s", name, pyName))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ", ")
+}
+
+// sortedKeys returns the keys of a map sorted alphabetically.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
 }
