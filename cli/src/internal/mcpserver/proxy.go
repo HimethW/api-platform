@@ -35,6 +35,9 @@ import (
 	"github.com/wso2/api-platform/cli/utils"
 )
 
+// GatewayNetworkSuffix is the suffix used by the gateway docker-compose network.
+const GatewayNetworkSuffix = "gateway-network"
+
 // ProxyConfig holds all parameters needed for the auto-proxy flow.
 type ProxyConfig struct {
 	ImageName  string      // Docker image name to run
@@ -71,11 +74,20 @@ func AutoProxy(config ProxyConfig) error {
 	}
 	fmt.Println("Gateway is healthy ✓")
 
-	// ── Step 2: Start the container ────────────────────────────────────
+	// ── Step 1b: Detect the gateway Docker network ─────────────────────
+	gatewayNetwork, err := findGatewayNetwork()
+	if err != nil {
+		return fmt.Errorf("could not find the gateway Docker network: %w\n\n"+
+			"Ensure the gateway is running via 'docker compose up -d' in the gateway/ directory", err)
+	}
+	fmt.Printf("Found gateway network: %s\n", gatewayNetwork)
+
+	// ── Step 2: Start the container on the gateway network ─────────────
 	fmt.Printf("Starting temporary container '%s'...\n", containerName)
 	startArgs := []string{
 		"run", "-d",
 		"-p", fmt.Sprintf("%d:%d", config.Port, config.Port),
+		"--network", gatewayNetwork,
 		"--name", containerName,
 		config.ImageName,
 	}
@@ -170,6 +182,13 @@ func AutoProxy(config ProxyConfig) error {
 		yamlContent = patchContextInYAML(yamlContent, config.Context)
 	}
 
+	// Patch the upstream URL to use the image name as the container name on the
+	// Docker network — the gateway runtime container can't reach localhost.
+	// We use the image name as the container name since that's what the user will
+	// use when starting the container permanently.
+	upstreamURL := fmt.Sprintf("http://%s:%d", config.ImageName, config.Port)
+	yamlContent = patchUpstreamInYAML(yamlContent, upstreamURL)
+
 	// Apply the MCP proxy config to the gateway
 	if err := applyMCPProxyConfig(gwClient, yamlContent); err != nil {
 		return err
@@ -177,19 +196,30 @@ func AutoProxy(config ProxyConfig) error {
 
 	// ── Step 6: Print proxy summary ────────────────────────────────────
 	gatewayServer := gwClient.GetBaseURL()
+	// The gateway endpoint exposed to clients is through the runtime (port 8080), not the controller
+	runtimeURL := strings.Replace(gatewayServer, ":9090", ":8080", 1)
 	contextPath := config.Context
 	if contextPath == "" {
 		contextPath = "/generated" // default from the MCP generate command
 	}
 
+	// Derive a stable container name for permanent run (without the temp timestamp)
+	permanentContainerName := config.ImageName
+
 	fmt.Println()
 	utils.PrintBoxedMessage([]string{
 		"✅ MCP proxy configured on gateway!",
 		"",
-		fmt.Sprintf("Gateway MCP endpoint: %s%s/mcp", gatewayServer, contextPath),
+		fmt.Sprintf("Gateway MCP endpoint: %s%s/mcp", runtimeURL, contextPath),
 		"",
-		"Important: The MCP server container must be running for the proxy to work.",
-		fmt.Sprintf("Start it with: docker run -p %d:%d %s", config.Port, config.Port, config.ImageName),
+		"Important: The MCP server container must be running on the gateway",
+		"network for the proxy to work.",
+		fmt.Sprintf("Start it with:"),
+		fmt.Sprintf("  docker run -d --name %s --network %s -p %d:%d %s",
+			permanentContainerName, gatewayNetwork, config.Port, config.Port, config.ImageName),
+		"",
+		fmt.Sprintf("To remove this proxy from the gateway:"),
+		fmt.Sprintf("  ap gateway mcp delete --id Generated-MCP-v1.0"),
 	})
 
 	return nil
@@ -351,6 +381,69 @@ func resourceExists(client *gateway.Client, handler gateway.ResourceHandler, han
 		return false, nil
 	}
 	return false, fmt.Errorf("unexpected status %d when checking MCP proxy existence", resp.StatusCode)
+}
+
+// patchUpstreamInYAML replaces the upstream url value in the generated MCP YAML.
+// The generator sets it to http://localhost:<port>, but the gateway runtime container
+// needs the Docker network-reachable address (container name).
+func patchUpstreamInYAML(yamlContent []byte, newUpstreamURL string) []byte {
+	lines := strings.Split(string(yamlContent), "\n")
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		if strings.HasPrefix(trimmed, "url:") {
+			indent := line[:len(line)-len(strings.TrimLeft(line, " "))]
+			lines[i] = fmt.Sprintf("%surl: %s", indent, newUpstreamURL)
+			break
+		}
+	}
+	return []byte(strings.Join(lines, "\n"))
+}
+
+// findGatewayNetwork finds the Docker network used by the running gateway containers.
+// It inspects containers matching the gateway-controller pattern and extracts their network.
+func findGatewayNetwork() (string, error) {
+	// First, try to find the network from a running gateway-controller container
+	psCmd := exec.Command("docker", "ps", "--format", "{{.Names}}", "--filter", "name=gateway-controller")
+	psOutput, err := psCmd.Output()
+	if err == nil {
+		containers := strings.Split(strings.TrimSpace(string(psOutput)), "\n")
+		for _, container := range containers {
+			container = strings.TrimSpace(container)
+			if container == "" {
+				continue
+			}
+			// Inspect the container's networks
+			inspectCmd := exec.Command("docker", "inspect", container,
+				"--format", "{{range $k, $v := .NetworkSettings.Networks}}{{$k}}\n{{end}}")
+			inspectOutput, inspErr := inspectCmd.Output()
+			if inspErr != nil {
+				continue
+			}
+			networks := strings.Split(strings.TrimSpace(string(inspectOutput)), "\n")
+			for _, net := range networks {
+				net = strings.TrimSpace(net)
+				if strings.HasSuffix(net, GatewayNetworkSuffix) {
+					return net, nil
+				}
+			}
+		}
+	}
+
+	// Fallback: look for any network ending with the suffix
+	cmd := exec.Command("docker", "network", "ls", "--format", "{{.Name}}")
+	output, err := cmd.Output()
+	if err != nil {
+		return "", fmt.Errorf("failed to list Docker networks: %w", err)
+	}
+
+	networks := strings.Split(strings.TrimSpace(string(output)), "\n")
+	for _, net := range networks {
+		net = strings.TrimSpace(net)
+		if strings.HasSuffix(net, GatewayNetworkSuffix) {
+			return net, nil
+		}
+	}
+	return "", fmt.Errorf("no Docker network ending with '%s' found — is the gateway running?", GatewayNetworkSuffix)
 }
 
 // extractMetadataName parses the YAML to get metadata.name.
